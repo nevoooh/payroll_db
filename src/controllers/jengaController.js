@@ -69,11 +69,11 @@ const initiateStkPush = async (req, res) => {
     );
 
     await pool.query(
-      `INSERT INTO wallet_transactions
-        (business_id, type, amount, reference, description, balance_after)
-       VALUES ($1, 'pending', $2, $3, 'M-Pesa STK Push', 0)`,
-      [business_id, amount, paymentRef]
-    );
+  `INSERT INTO wallet_transactions
+    (business_id, type, amount, reference, description, balance_after)
+   VALUES ($1, 'pending', $2, $3, 'M-Pesa STK Push', 0)`,
+  [business_id, amount, orderRef]  // ← orderRef not paymentRef
+);
 
     return res.json({
       message:       'STK push sent — check your phone',
@@ -94,26 +94,23 @@ const jengaCallback = async (req, res) => {
   res.setHeader('ngrok-skip-browser-warning', 'any-value');
 
   try {
-    const body     = req.body;
+    const body   = req.body;
     console.log('Jenga callback received:', JSON.stringify(body, null, 2));
 
-    const stkCallback = body?.data?.Body?.stkCallback;
-    const resultCode  = stkCallback?.ResultCode;
-    const checkoutId  = stkCallback?.CheckoutRequestID;
+    // ── IPN callback (from Jenga Payment Gateway)
+    const status    = body?.transaction?.status;
+    const amount    = parseFloat(body?.transaction?.amount || 0);
+    const orderRef  = body?.customer?.reference; // e.g. ORD21777880172357
+    const mpesaRef  = body?.transaction?.reference;
 
-    // Extract amount and receipt from CallbackMetadata
-    const items      = stkCallback?.CallbackMetadata?.Item || [];
-    const getItem    = (name) => items.find(i => i.Name === name)?.Value;
-    const amount     = parseFloat(getItem('Amount') || 0);
-    const mpesaRef   = getItem('MpesaReceiptNumber');
+    console.log(`Status: ${status}, OrderRef: ${orderRef}, Amount: ${amount}`);
 
-    console.log(`ResultCode: ${resultCode}, CheckoutID: ${checkoutId}, Amount: ${amount}, Ref: ${mpesaRef}`);
-
-    if (resultCode === 0 && checkoutId && amount > 0) {
-      // Find pending transaction by checkoutRequestId
+    if (status === 'SUCCESS' && orderRef && amount > 0) {
+      // Match against our pending transaction using orderRef
       const txn = await pool.query(
-        `SELECT * FROM wallet_transactions WHERE reference LIKE $1 AND type = 'pending'`,
-        [`%${checkoutId}%`]
+        `SELECT * FROM wallet_transactions 
+         WHERE reference = $1 AND type = 'pending'`,
+        [orderRef]
       );
 
       if (txn.rows.length > 0) {
@@ -133,20 +130,19 @@ const jengaCallback = async (req, res) => {
 
         await pool.query(
           `UPDATE wallet_transactions
-           SET type = 'credit', balance_after = $1, 
-               description = 'M-Pesa Top Up Success',
-               reference = $2
-           WHERE id = $3`,
-          [newBalance, mpesaRef, id]
+           SET type = 'credit', balance_after = $1,
+               description = 'M-Pesa Top Up Success'
+           WHERE id = $2`,
+          [newBalance, id]
         );
 
         await pool.query('COMMIT');
         console.log(`Wallet credited for business ${business_id}. New balance: ${newBalance}`);
       } else {
-        console.log(`No pending transaction found for checkout: ${checkoutId}`);
+        console.log(`No pending transaction found for orderRef: ${orderRef}`);
       }
     } else {
-      console.log(`Payment failed — ResultCode: ${resultCode}`);
+      console.log(`Payment not successful — status: ${status}`);
     }
 
     return res.status(200).json({ message: 'Callback received' });
