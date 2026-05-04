@@ -8,7 +8,7 @@ const protect = (req, res, next) => {
   }
 
   try {
-    const decoded = jwt.verify(token, 'mypayrollsecretkey2024');
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
     req.business = decoded;
     next();
   } catch (error) {

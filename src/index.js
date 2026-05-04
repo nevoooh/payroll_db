@@ -27,7 +27,7 @@ app.get('/', (req, res) => {
 
 // ← ADD THIS — catches any unhandled errors
 app.use((err, req, res, next) => {
-  console.error('Unhandled error:', err.message);
+  console.error('Unhandled error:', err?.message || err);
   res.status(500).json({ message: 'Something went wrong' });
 });
 
