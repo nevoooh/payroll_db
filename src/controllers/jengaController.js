@@ -90,40 +90,34 @@ const initiateStkPush = async (req, res) => {
   }
 };
 
-// ── JENGA CALLBACK ────────────────────────────────────────
 const jengaCallback = async (req, res) => {
   res.setHeader('ngrok-skip-browser-warning', 'any-value');
 
-  // Verify basic auth from Jenga IPN
-  const authHeader = req.headers['authorization'];
-  if (authHeader && authHeader.startsWith('Basic ')) {
-    const base64             = authHeader.split(' ')[1];
-    const decoded            = Buffer.from(base64, 'base64').toString('utf8');
-    const [username, password] = decoded.split(':');
-    if (
-      username !== process.env.JENGA_IPN_USERNAME ||
-      password !== process.env.JENGA_IPN_PASSWORD
-    ) {
-      return res.status(401).json({ message: 'Unauthorized' });
-    }
-  }
-
   try {
-    const body   = req.body;
-    const status = body?.order?.status || body?.transaction?.status || body?.status;
-    const ref    = body?.payment?.paymentReference || body?.paymentReference || body?.transaction?.reference;
-    const amount = parseFloat(body?.order?.orderAmount || body?.amount || 0);
-
+    const body     = req.body;
     console.log('Jenga callback received:', JSON.stringify(body, null, 2));
 
-    if ((status === 'SUCCESS' || status === '00') && ref && amount > 0) {
+    const stkCallback = body?.data?.Body?.stkCallback;
+    const resultCode  = stkCallback?.ResultCode;
+    const checkoutId  = stkCallback?.CheckoutRequestID;
+
+    // Extract amount and receipt from CallbackMetadata
+    const items      = stkCallback?.CallbackMetadata?.Item || [];
+    const getItem    = (name) => items.find(i => i.Name === name)?.Value;
+    const amount     = parseFloat(getItem('Amount') || 0);
+    const mpesaRef   = getItem('MpesaReceiptNumber');
+
+    console.log(`ResultCode: ${resultCode}, CheckoutID: ${checkoutId}, Amount: ${amount}, Ref: ${mpesaRef}`);
+
+    if (resultCode === 0 && checkoutId && amount > 0) {
+      // Find pending transaction by checkoutRequestId
       const txn = await pool.query(
-        `SELECT * FROM wallet_transactions WHERE reference = $1 AND type = 'pending'`,
-        [ref]
+        `SELECT * FROM wallet_transactions WHERE reference LIKE $1 AND type = 'pending'`,
+        [`%${checkoutId}%`]
       );
 
       if (txn.rows.length > 0) {
-        const { business_id } = txn.rows[0];
+        const { business_id, id } = txn.rows[0];
 
         await pool.query('BEGIN');
 
@@ -139,20 +133,20 @@ const jengaCallback = async (req, res) => {
 
         await pool.query(
           `UPDATE wallet_transactions
-           SET type = 'credit', balance_after = $1, description = 'M-Pesa Top Up Success'
-           WHERE reference = $2`,
-          [newBalance, ref]
+           SET type = 'credit', balance_after = $1, 
+               description = 'M-Pesa Top Up Success',
+               reference = $2
+           WHERE id = $3`,
+          [newBalance, mpesaRef, id]
         );
 
         await pool.query('COMMIT');
         console.log(`Wallet credited for business ${business_id}. New balance: ${newBalance}`);
+      } else {
+        console.log(`No pending transaction found for checkout: ${checkoutId}`);
       }
     } else {
-      console.log(`Payment failed or cancelled for ref: ${ref}`);
-      await pool.query(
-        `UPDATE wallet_transactions SET type = 'failed' WHERE reference = $1`,
-        [ref]
-      );
+      console.log(`Payment failed — ResultCode: ${resultCode}`);
     }
 
     return res.status(200).json({ message: 'Callback received' });
